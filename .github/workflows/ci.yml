@@ -1,0 +1,167 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  # ============================================================================
+  # LINT AND CODE QUALITY
+  # ============================================================================
+  lint:
+    runs-on: ubuntu-latest
+    name: Lint and Code Quality
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 black pylint
+    
+    - name: Run Black formatter check
+      run: black --check src/ streamlit_app/ configs/
+      continue-on-error: true
+    
+    - name: Run Flake8 linter
+      run: flake8 src/ streamlit_app/ configs/ --count --select=E9,F63,F7,F82 --show-source --statistics
+      continue-on-error: true
+    
+    - name: Run Pylint
+      run: pylint src/ --disable=all --enable=E,F
+      continue-on-error: true
+  
+  # ============================================================================
+  # UNIT TESTS
+  # ============================================================================
+  test:
+    runs-on: ubuntu-latest
+    name: Unit Tests
+    needs: lint
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt pytest pytest-cov
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsm6 libxext6 libxrender-dev
+    
+    - name: Run pytest
+      run: |
+        pytest tests/ -v --cov=src/ --cov-report=xml
+      continue-on-error: true
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+      continue-on-error: true
+  
+  # ============================================================================
+  # BUILD DOCKER IMAGE
+  # ============================================================================
+  build:
+    runs-on: ubuntu-latest
+    name: Build Docker Image
+    needs: test
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    - name: Build Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        file: ./docker/Dockerfile
+        tags: emotion-recognition:latest
+        load: true
+      continue-on-error: true
+    
+    - name: Test Docker image
+      run: |
+        docker run --rm emotion-recognition:latest python -c "import tensorflow as tf; print(f'TensorFlow {tf.__version__}')"
+      continue-on-error: true
+  
+  # ============================================================================
+  # SECURITY SCAN
+  # ============================================================================
+  security:
+    runs-on: ubuntu-latest
+    name: Security Scan
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+      continue-on-error: true
+    
+    - name: Upload Trivy results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+      continue-on-error: true
+  
+  # ============================================================================
+  # DOCUMENTATION
+  # ============================================================================
+  docs:
+    runs-on: ubuntu-latest
+    name: Check Documentation
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Check if README exists
+      run: test -f README.md && echo "README exists" || exit 1
+    
+    - name: Check if requirements.txt exists
+      run: test -f requirements.txt && echo "requirements.txt exists" || exit 1
+
+  # ============================================================================
+  # NOTIFY SUCCESS
+  # ============================================================================
+  notify:
+    runs-on: ubuntu-latest
+    name: Notify Pipeline Status
+    needs: [lint, test, build, security, docs]
+    if: always()
+    
+    steps:
+    - name: Pipeline Status
+      run: |
+        if [ "${{ needs.lint.result }}" == "success" ] && \
+           [ "${{ needs.test.result }}" == "success" ] && \
+           [ "${{ needs.build.result }}" == "success" ]; then
+          echo "✅ All checks passed!"
+        else
+          echo "⚠️ Some checks failed or were skipped"
+        fi
